@@ -11,10 +11,19 @@ from telegram.ext import (
 import requests
 import random
 import wikipedia
+import sqlite3
 
 # Настройки
 TOKEN = "7778655865:AAGz5DQnaJyrpFmtwMz01ehRkkTKiGsFmhw"
 wikipedia.set_lang("ru")
+
+def init_db():
+    conn = sqlite3.connect('reminders.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS reminders
+                 (chat_id int, reminder_text text, time int)''')
+    conn.commit()
+    conn.close()
 
 # Логирование
 logging.basicConfig(
