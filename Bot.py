@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 SETTING_REMINDER = 1
 
 # Менюшка в боте
-main_keyboard = [['Напоминание', 'Конвертер валют'], ['Пароль', 'Википедия'], ['Помощь']]
+main_keyboard = [['Напоминание', 'Конвертер валют'], ['Пароль', 'Википедия'], ['Помощь', 'Отмена']]
 reply_markup = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True)
 
 
@@ -38,6 +38,13 @@ async def start(update: Update, context: CallbackContext):
         reply_markup=reply_markup
     )
 
+# Функция отмены
+async def cancel(update: Update, context: CallbackContext) -> int:
+    await update.message.reply_text(
+        "Действие отменено.",
+        reply_markup=reply_markup
+    )
+    return ConversationHandler.END
 
 async def help_command(update: Update, context: CallbackContext):
     help_text = """
@@ -60,7 +67,7 @@ async def help_command(update: Update, context: CallbackContext):
 Пример: /password 12
 
 🔍 /wiki <запрос>
-Ищет в Википедии
+Ищет в вики
 Пример: /wiki Python
 """
     await update.message.reply_text(help_text)
@@ -70,12 +77,17 @@ async def reminder(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text(
         "📝 Введи напоминание в формате:\n"
         "<текст> через <минуты>\n\n"
-        "Пример: Сделать презентацию через 30"
+        "Пример: Сделать презентацию через 30\n\n"
+        "Или нажми 'Отмена' для выхода",
+        reply_markup=reply_markup
     )
     return SETTING_REMINDER
 
 
 async def set_reminder(update: Update, context: CallbackContext) -> int:
+    if update.message.text.lower() == 'отмена':
+        return await cancel(update, context)
+
     try:
         text = update.message.text
         if "через" not in text:
@@ -89,12 +101,26 @@ async def set_reminder(update: Update, context: CallbackContext) -> int:
             await update.message.reply_text("Время должно быть больше 0 минут!")
             return SETTING_REMINDER
 
-        # Сохранение данных о напоминаниях
-        context.user_data['reminder'] = {
-            'text': task,
-            'minutes': minutes,
-            'chat_id': update.message.chat_id
-        }
+        # Сохраняем задачу
+        job = context.job_queue.run_once(
+            callback=send_reminder,
+            when=minutes * 60,
+            data={
+                'chat_id': update.message.chat_id,
+                'text': task
+            },
+            name=f"reminder_{update.message.chat_id}"
+        )
+
+        context.user_data['reminder_job'] = job
+
+        await update.message.reply_text(
+            f"⏰ Напоминание установлено!\n"
+            f"Я напомню: '{task}'\n"
+            f"Через {minutes} минут\n\n"
+            f"Можешь отменить командой /cancelreminder",
+            reply_markup=reply_markup
+        )
 
         # Запуска напоминания
         asyncio.create_task(
@@ -121,6 +147,27 @@ async def set_reminder(update: Update, context: CallbackContext) -> int:
         return SETTING_REMINDER
 
     return ConversationHandler.END
+
+async def cancel_reminder(update: Update, context: CallbackContext):
+    if 'reminder_job' in context.user_data:
+        context.user_data['reminder_job'].schedule_removal()
+        del context.user_data['reminder_job']
+        await update.message.reply_text("⏸ Напоминание отменено!", reply_markup=reply_markup)
+    else:
+        await update.message.reply_text("Нет активных напоминаний для отмены", reply_markup=reply_markup)
+
+async def send_reminder(context: CallbackContext):
+    job = context.job
+    try:
+        await context.bot.send_message(
+            chat_id=job.data['chat_id'],
+            text=f"🔔 Напоминаю: {job.data['text']}",
+            reply_markup=reply_markup
+        )
+        if 'reminder_job' in context.user_data:
+            del context.user_data['reminder_job']
+    except Exception as e:
+        logger.error(f"Ошибка при отправке напоминания: {e}")
 
 
 async def send_reminder_after_delay(delay: int, chat_id: int, text: str, context: CallbackContext):
@@ -240,7 +287,7 @@ async def button_handler(update: Update, context: CallbackContext):
         )
     elif text == 'Википедия':
         await update.message.reply_text(
-            "Для поиска в Википедии используй команду:\n\n"
+            "Для поиска в вики используй команду:\n\n"
             "`/wiki <запрос>`\n\n"
             "Пример: `/wiki Python`",
             parse_mode="Markdown"
@@ -256,9 +303,12 @@ def main():
     reminder_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^Напоминание$'), reminder)],
         states={
-            SETTING_REMINDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_reminder)]
+            SETTING_REMINDER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, set_reminder),
+                MessageHandler(filters.Regex('^Отмена$'), cancel)
+            ]
         },
-        fallbacks=[]
+        fallbacks=[CommandHandler("cancel", cancel)]
     )
 
     application.add_handler(CommandHandler("start", start))
@@ -266,11 +316,11 @@ def main():
     application.add_handler(CommandHandler("convert", currency_converter))
     application.add_handler(CommandHandler("password", generate_password))
     application.add_handler(CommandHandler("wiki", wiki_search))
+    application.add_handler(CommandHandler("cancelreminder", cancel_reminder))
     application.add_handler(reminder_handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
 
     application.run_polling()
-
 
 if __name__ == '__main__':
     print("Бот запущен и готов к работе!")
